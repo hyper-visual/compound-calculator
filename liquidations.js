@@ -1,84 +1,132 @@
-const readline = require('readline');
-const axios = require('axios');
+import readline from "readline";
+// const axios = require("axios");
+import { ApolloClient, InMemoryCache, gql } from "@apollo/client";
+import "isomorphic-fetch";
 
-const readUserInput = query => {
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
+const readUserInput = (query) => {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
 
-    return new Promise(resolve => rl.question(query, ans => {
-        rl.close();
-        resolve(ans);
-    }))
-}
+  return new Promise((resolve) =>
+    rl.question(query, (ans) => {
+      rl.close();
+      resolve(ans);
+    })
+  );
+};
 
-const fetchAssetsPrices = async () => {
-    let json;
-    await axios.get(
-        'https://api.coingecko.com/api/v3/simple/price?ids=ethereum,dai,usd-coin,augur,basic-attention-token,0x,wrapped-bitcoin&vs_currencies=usd'
-        ).then(
-            resp => {
-                json = resp.data;
-            }
-        );
-    return json;
-}
+const thegraph_url =
+  "https://api.thegraph.com/subgraphs/name/graphprotocol/compound-v2";
 
+const Query = `
+	  query {
+	    markets(where: {symbol_in: ["cETH", "cDAI", "cUSDC", "cBAT", "cREP", "cZRX", "cWBTC"]}, orderBy: symbol) {
+        symbol
+        accrualBlockNumber
+        collateralFactor
+        underlyingPrice
+        underlyingSymbol
+      }
+	  }
+	`;
+
+const setPrice = (data, assetPrice) => {
+  const marketArray = data.data.markets;
+  for (let i = 0; i < marketArray.length; i++) {
+    // 같은 symbol에 대해 결과가 여러 개 들어있을 수 있어서 query날릴 때 orderby: symbol로 설정하여 같은 symbol들의 결과 붙어있게 정렬
+    // 붙어있는 같은 symbol의 결과들 중에서 가장 최신의 underlying price를 저장
+    if (
+      i === 0 ||
+      marketArray[i].symbol !== marketArray[i - 1].symbol ||
+      marketArray[i].accurateBlockNumber >
+        marketArray[i - 1].accurateBlockNumber
+    ) {
+      assetPrice[`${marketArray[i].underlyingSymbol.toLowerCase()}`] =
+        parseFloat(marketArray[i].underlyingPrice);
+    }
+  }
+  return assetPrice;
+};
 
 const getLiqPrice = async () => {
-    let assets = ['eth', 'dai', 'usdc', 'bat', 'rep', 'zrx', 'wbtc'];
-    let selectedAssets_s = await readUserInput("Which asset do you want to supply?('eth', 'dai', 'usdc', 'bat', 'rep', 'zrx', 'wbtc') : ");
-    
-    // getSupply()
-    let supplyq = parseFloat(await readUserInput("How much do you want to supply? : "));
-    
-    // fetch assets prices
-    let assets_prices = {};
-    let json = await fetchAssetsPrices();
-    assets_prices["eth"] = json.ethereum.usd;
-    assets_prices["dai"] = json.dai.usd;
-    assets_prices["usdc"] = json["usd-coin"].usd;
-    assets_prices["bat"] = json["basic-attention-token"].usd;
-    assets_prices["rep"] = json.augur.usd;
-    assets_prices["zrx"] = json["0x"].usd;
-    assets_prices["wbtc"] = json["wrapped-bitcoin"].usd;
-    
-    // getSupplyPrice()
-    let supply_price = assets_prices[selectedAssets_s];
+  let selectedAssets_s = await readUserInput(
+    "Which asset do you want to supply?('eth', 'dai', 'usdc', 'bat', 'rep', 'zrx', 'wbtc') : "
+  );
 
-    // getBorrowPrice()
-    let selectedAssets_b = await readUserInput("Which asset do you want to borrow?('eth', 'dai', 'usdc', 'bat', 'rep', 'zrx', 'wbtc') : ");
-    let borrow_price = assets_prices[selectedAssets_b];
-    
-    // getBorrow()
-    let borrowq = parseFloat(await readUserInput("How much do you want to borrow? : "));
+  // getSupply()
+  let supplyq = parseFloat(
+    await readUserInput("How much do you want to supply? : ")
+  );
 
-    let collateral_ratio = ((supplyq * supply_price) * 1) / (borrowq * borrow_price);
+  // fetch assets prices
+  let assets_prices = {};
 
-    // getColfFactor()
-    let cf;
-    if (selectedAssets_s === "eth" || "usdc" || "dai") {
-        cf = 0.75;
-    } else if (selectedAssets_s === "bat" || "zrx") {
-        cf = 0.6;
-    } else if (selectedAssets_s === "rep") {
-        cf = 0.5;
-    } else if (selectedAssets_s === "wbtc") {
-        cf = 0;
-    }
+  const client = new ApolloClient({
+    uri: thegraph_url,
+    cache: new InMemoryCache(),
+  });
 
-    let liq_ratio = 1 / cf;
-    let liq_value = ((supplyq * supply_price) * liq_ratio) / collateral_ratio;
-    let liqprice = liq_value / supplyq;
+  client
+    .query({
+      query: gql(Query),
+    })
+    .then((data) => {
+      assets_prices = setPrice(data, assets_prices);
+    })
+    .catch((err) => {
+      console.log("Error fetching data: ", err);
+    });
 
-    if (liqprice < supply_price) {
-        console.log(`Your current collateral ratio is ${(collateral_ratio * 100).toFixed(2)}%`);
-        console.log(`"Your loan will be liquidated if ${selectedAssets_s.toUpperCase()} falls below $${liqprice.toFixed(3)} (Collateral value < $${liq_value.toFixed(0)})`);
-    } else {
-        console.log('Your loan is under collateralized.');
-        console.log(`Your current collateral ratio is ${(collateral_ratio * 100).toFixed(2)}`);
-    }
-}
+  // getBorrowPrice()
+  let selectedAssets_b = await readUserInput(
+    "Which asset do you want to borrow?('eth', 'dai', 'usdc', 'bat', 'rep', 'zrx', 'wbtc') : "
+  );
+
+  // getBorrow()
+  let borrowq = parseFloat(
+    await readUserInput("How much do you want to borrow? : ")
+  );
+
+  // getSupplyPrice()
+  let supply_price = assets_prices[selectedAssets_s];
+  let borrow_price = assets_prices[selectedAssets_b];
+
+  let collateral_ratio =
+    (supplyq * supply_price * 1) / (borrowq * borrow_price);
+
+  // getColfFactor()
+  let cf;
+  if (selectedAssets_s === "eth" || "usdc" || "dai") {
+    cf = 0.75;
+  } else if (selectedAssets_s === "bat" || "zrx") {
+    cf = 0.6;
+  } else if (selectedAssets_s === "rep") {
+    cf = 0.5;
+  } else if (selectedAssets_s === "wbtc") {
+    cf = 0;
+  }
+
+  let liq_ratio = 1 / cf;
+  let liq_value = (supplyq * supply_price * liq_ratio) / collateral_ratio;
+  let liqprice = liq_value / supplyq;
+
+  if (liqprice < supply_price) {
+    console.log(
+      `Your current collateral ratio is ${(collateral_ratio * 100).toFixed(2)}%`
+    );
+    console.log(
+      `"Your loan will be liquidated if ${selectedAssets_s.toUpperCase()} falls below $${liqprice.toFixed(
+        3
+      )} (Collateral value < $${liq_value.toFixed(0)})`
+    );
+  } else {
+    console.log("Your loan is under collateralized.");
+    console.log(
+      `Your current collateral ratio is ${(collateral_ratio * 100).toFixed(2)}`
+    );
+  }
+};
 
 getLiqPrice();
